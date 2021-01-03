@@ -1,0 +1,286 @@
+- hosts: localhost
+  vars_files:
+  - secret.yml
+  - main_varfile.yml      
+  tasks:
+  - name: "Create a VPC"
+    ec2_vpc_net:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        name: "{{ vpc_name }}"
+        cidr_block: "{{ vpc_cidr }}"
+        region: "{{ region }}"
+        state: present
+    register: VPC
+
+  - name: "info about vpc"
+    debug:
+        var: VPC.vpc.id
+
+
+  - name: "Create ec2 Vpc Internet Gateway"
+    ec2_vpc_igw:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        vpc_id : "{{ VPC.vpc.id }}"
+        region: "{{ region }}"
+        state: present
+        tags:
+            Name: "{{ igw_name }}"
+    register: igw
+ 
+  - name: "Info about igw created"
+    debug:
+        var: igw
+       
+
+  - name: "Create subnet associate with the vpc created"
+    ec2_vpc_subnet:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        state: present
+        vpc_id: "{{ VPC['vpc']['id'] }}"
+        region: "{{ region }}"
+        az: "{{ azone }}"
+        cidr: "{{ subnet_cidr }}"
+        map_public: yes
+        resource_tags:
+              Name: "{{ subnet_name }}"
+    register: subnet
+
+  - name: "info about subnet"
+    debug:
+        var: subnet.subnet.id
+
+
+  - name: "Create a security group"
+    ec2_group:
+        name: "elbSG"
+        description: "Security group for ELB"
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        tags:
+           Name: "{{ security_group_name }}"
+        vpc_id: "{{ VPC.vpc.id }}"
+        region: "{{ region }}"
+        rules: 
+          - proto: tcp
+            ports:
+            - 80
+            cidr_ip: 0.0.0.0/0
+            rule_desc: "allow all on port 80"
+
+          - proto: tcp
+            ports:
+            - 22
+            cidr_ip: 0.0.0.0/0
+            rule_desc: "allow all on port 22"
+          
+          - proto: tcp
+            from_port: 80
+            to_port: 8081
+            cidr_ip: 0.0.0.0/0
+
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+
+    register: security_group
+
+  - name: "info about security group"
+    debug:
+        var: security_group.group_id   
+ 
+
+  - name: "Create a vpc public subnet route table and add route for igw"
+    ec2_vpc_route_table:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        vpc_id: "{{ VPC.vpc.id }}"
+        region: "{{ region }}"
+        state: present
+        tags:
+             Name: "{{ route_table_name }}"
+        subnets: [ "{{ subnet.subnet.id }}" ]
+        #Create route to public subnet route table associated with igw"
+        routes:
+            - dest: "{{ destination_cidr_block }}"
+              gateway_id: "{{ igw.gateway_id }}"
+    register: route_table 
+
+    #  - name: "Info about route table"
+    #debug:
+    #     var: route_table
+
+
+  - name: "Print out vpc, subnet id and security group for vpc"
+    debug:
+            msg: "For using the above created VPC: {{ vpc_name }}; Use subnet id: {{ subnet.subnet.id }} and security group: {{ security_group.group_id }} to create an ec2 instances "
+
+
+  - name: "Launching 2 ec2-instances as backend_server for lb"
+    ec2:
+        key_name: "{{ key_pair }}"
+        instance_type: "{{ instancetype }}"
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        image: "{{ image_name }}"
+        wait: yes
+        count: "{{ total_count }}"
+        instance_tags:
+             Name: "{{ name_of_instances }}"
+        vpc_subnet_id: "{{ subnet.subnet.id }}"
+        group_id: "{{ security_group.group_id }}"
+        state: present
+        region: "{{ region }}"
+    register: ec2
+     
+  - name: "info about ec2 instances"
+    debug:
+        var: ec2
+        
+
+  - name: "Public IPs of both backend servers"
+    debug:
+      var: ec2.instances[0].public_ip, ec2.instances[1].public_ip
+
+      #  - name: "wait for 2 minute"
+      # pause:
+      # minutes: "{{ pause_time }}"
+
+  - set_fact: 
+        id: "{{ id + item['instance_ids'] }}"
+    with_items: 
+        - "{{ ec2.tagged_instances }}"
+
+  - debug:
+       msg: "{{ id }}"
+
+  - set_fact:
+        ip: "{{ ip + item['instances'] }}"
+    with_items:
+        - "{{ ec2.tagged_instances }}"
+
+  - debug:
+        msg: "{{ item.public_ip }}"
+    with_items: "{{ ip }}"
+
+
+  - name: "Add new instance to host group"
+    add_host:
+           hostname: "{{ item.public_ip }}"
+           groupname: webserver
+    loop: "{{ ec2.instances }}"
+
+  - name: "Wait for ssh to come up"
+    wait_for:
+           host: "{{ item.public_dns_name }}"
+           port: 22
+           state: started
+    loop: "{{ ec2.instances }}"
+
+
+ 
+- hosts: webserver
+  vars_files:
+  - secret.yml
+  - main_varfile.yml
+     
+  tasks:
+  - name: "Installing httpd software"
+    package:
+        name: "{{ software_name }}"
+        state: present
+
+  - name: "Installing php package"
+    package:
+        name: "php"
+        state: present
+
+  - name: "Copy the web page"
+    copy:
+        src: "{{ src_path }}"
+        dest: "{{ dest_path }}"
+    notify: "restart_service"
+
+  - name: "Starting httpd service"
+    service:
+        name: "{{ software_name }}"
+        state: started
+
+  handlers:
+  - name: "restart_service"
+    service:
+        name: "{{ software_name }}"
+        state: restarted
+
+
+
+- hosts: localhost
+  vars_files:
+          - secret.yml
+          - main_varfile.yml
+  tasks:
+  - name: "Launching an  ec2-instance as loadbalancer for REVERSE PROXY"
+    ec2:
+        key_name: "{{ key_pair }}"
+        instance_type: "{{ instancetype }}"
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        image: "{{ image_name }}"
+        wait: yes
+        count: 1
+        instance_tags:
+             Name: "{{ name_of_instance1 }}"
+        vpc_subnet_id: "{{ subnet.subnet.id }}"
+        group_id: "{{ security_group.group_id }}"
+        state: present
+        region: "{{ region }}"
+    register: x
+
+  - name: "info about ec2 instances"
+    debug:
+        var: x.instances.public_ip
+
+  - set_fact:
+        ip1: "{{ ip1 + item['instances'] }}"
+    with_items:
+        - "{{ x.tagged_instances }}"
+
+  - debug:
+        msg: "{{ item.public_ip }}"
+    with_items: "{{ ip1 }}"
+
+
+  - name: "Add new instance to host group"
+    add_host:
+           hostname: "{{ item.public_ip }}"
+           groupname: loadbalancer
+    loop: "{{ x.instances }}"
+
+  - name: "Wait for ssh to come up"
+    wait_for:
+           host: "{{ item.public_dns_name }}"
+           port: 22
+           state: started
+    loop: "{{ x.instances }}"
+
+
+
+- hosts: loadbalancer
+  vars_files:
+          - secret.yml
+  tasks:
+  - name: "Installing haproxy"
+    package:
+         name: "haproxy"
+         state: present
+
+  - name: "Configuring haproxy"
+    template:
+         src: "/etc/haproxy/haproxy.cfg"
+         dest: "/etc/haproxy/haproxy.cfg"
+
+  - name: "Starting haproxy"
+    service:
+         name: "haproxy"
+         state: restarted
