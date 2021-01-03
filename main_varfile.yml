@@ -1,0 +1,32 @@
+key_pair: "key_inNvirginia" #pem format key
+region: "us-east-1"
+azone: "us-east-1a"
+
+vpc_name: "Ansible_Vpc"
+vpc_cidr: 10.10.0.0/24
+
+id: []
+ip: []
+ip1: []
+
+igw_name: "vpc_igw"
+
+subnet_cidr: 10.10.0.0/26
+subnet_name: "Ansible_subnet"
+
+route_table_name: "PS_Route_igw_table"
+destination_cidr_block: "0.0.0.0/0"
+
+security_group_name: "SG_for_ELB_ec2instances"
+
+name_of_instance1: "lb"
+name_of_instances: "wb"
+instancetype: "t2.micro"
+image_name: "ami-0be2609ba883822ec"
+total_count: 2
+
+pause_time: 1
+
+software_name: "httpd"
+src_path: "/root/web.php"
+dest_path: "/var/www/html"
